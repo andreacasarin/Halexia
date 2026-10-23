@@ -4,6 +4,12 @@ Halexia provides one Alexa skill with Smart Home and Custom conversation models,
 
 Home Assistant remains responsible for exposed entities, Smart Home controls, and the conversation agent's instructions and permissions. Alexa account linking supplies the user's Home Assistant access token for each request.
 
+I built Halexia because I wanted a deeper conversation with my home through the Alexa devices I already own. My existing integration handled predefined commands, but I wanted to ask questions, understand what was happening, and request actions naturally.
+
+Home Assistant’s own voice devices are appealing: their price supports privacy-focused hardware and helps fund a project that has given us so much. For me, reusing the microphones and speakers already around the house made more sense.
+
+Inspired by the [community Alexa–Assist bridge](https://community.home-assistant.io/t/alexa-home-assistant-assist-bridge-let-your-echo-ask-questions-and-route-the-answers-into-assist/1016161), I extended my existing integration so ordinary controls still work while conversations reach Home Assistant’s AI. After testing and refining it, I separated the small bridge from my home configuration and called it Halexia.
+
 ## Build and deploy
 
 From the root of a standalone checkout, run:
