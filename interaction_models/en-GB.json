@@ -1,0 +1,21 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "home assistant",
+      "intents": [
+        {
+          "name": "AskHomeIntent",
+          "slots": [{"name": "query", "type": "AMAZON.SearchQuery"}],
+          "samples": [
+            "ask {query}",
+            "question {query}"
+          ]
+        },
+        {"name": "AMAZON.HelpIntent", "samples": []},
+        {"name": "AMAZON.StopIntent", "samples": []},
+        {"name": "AMAZON.CancelIntent", "samples": []},
+        {"name": "AMAZON.FallbackIntent", "samples": []}
+      ]
+    }
+  }
+}

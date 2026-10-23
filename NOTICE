@@ -1,0 +1,9 @@
+Third-party code attribution
+
+Portions of the Alexa Smart Home event forwarding flow are adapted from code
+copyright 2019 Jason Hu <awaregit@gmail.com>. Those adapted portions are made
+available under the Apache License, Version 2.0; see third_party/LICENSE.
+
+This project is licensed under the Apache License, Version 2.0; see LICENSE.
+The attribution and third-party license above also apply to the adapted
+portions; see third_party/LICENSE.

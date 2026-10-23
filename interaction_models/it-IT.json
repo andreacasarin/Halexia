@@ -1,0 +1,21 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "assistente casa",
+      "intents": [
+        {
+          "name": "AskHomeIntent",
+          "slots": [{"name": "query", "type": "AMAZON.SearchQuery"}],
+          "samples": [
+            "chiedi {query}",
+            "domanda {query}"
+          ]
+        },
+        {"name": "AMAZON.HelpIntent", "samples": []},
+        {"name": "AMAZON.StopIntent", "samples": []},
+        {"name": "AMAZON.CancelIntent", "samples": []},
+        {"name": "AMAZON.FallbackIntent", "samples": []}
+      ]
+    }
+  }
+}
