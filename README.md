@@ -7,6 +7,7 @@ A self-deployed Alexa skill bridge for Home Assistant. Smart Home directives go 
 [![Apache 2.0 license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 ![AWS Lambda Python 3.12](https://img.shields.io/badge/AWS%20Lambda-Python%203.12-orange)
 [![Voice models: en-GB and it-IT](https://img.shields.io/badge/voice%20models-en--GB%20and%20it--IT-blue)](interaction_models/)
+[![CI](https://github.com/andreacasarin/Halexia/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/andreacasarin/Halexia/actions/workflows/ci.yml)
 
 Each user creates and operates their own AWS Lambda function and Alexa skill, linked to their own Home Assistant instance. This repository provides source code for self-deployment, not a shared Alexa skill.
 
@@ -15,12 +16,14 @@ Each user creates and operates their own AWS Lambda function and Alexa skill, li
 ```mermaid
 flowchart LR
     A[Alexa skill] --> L[Your AWS Lambda]
-    L -->|Smart Home directive| S[Home Assistant<br/>/api/alexa/smart_home]
+    L -->|Smart Home directive| S["Home Assistant Smart Home API<br/>/api/alexa/smart_home"]
     S --> L
-    L -->|Custom intent| C[Home Assistant<br/>/api/conversation/process]
+    L -->|Custom intent| C["Home Assistant conversation API<br/>/api/conversation/process"]
     C --> L
     L -->|Alexa response| A
 ```
+
+Smart Home handles ordinary device controls directly. Custom requests go to the selected Home Assistant conversation agent, which may use AI; the bridge does not require or provide an AI model.
 
 ## Voice models
 
@@ -74,6 +77,12 @@ Alexa and Lambda need trusted HTTPS access to the Home Assistant host on port 44
 ### Lambda diagnostics
 
 Set `DEBUG=1` to enable sanitized Custom failure warnings. Any non-empty value enables them, including `DEBUG=0`; remove the variable or leave it empty to disable diagnostics. Warnings include only fixed categories and numeric HTTP status or configuration key names. They do not include requests, responses, URLs, headers, questions, speech, tokens, or exception details.
+
+## CI and releases
+
+GitHub Actions runs the test suite and builds the Lambda ZIP for pushes and pull requests to `main`. Successful runs upload `halexia.zip` as a workflow artifact for 14 days. Download it from the run’s **Artifacts** section; it is the Lambda ZIP itself, with no outer archive to extract. [View workflow runs](https://github.com/andreacasarin/Halexia/actions/workflows/ci.yml).
+
+When a `v*` version tag is pushed, the release workflow tests and builds that tag and publishes `halexia.zip` as a GitHub Release asset. Download versioned packages from [GitHub Releases](https://github.com/andreacasarin/Halexia/releases). A release provides the Lambda ZIP; it does not deploy it to AWS.
 
 ## Configure the Alexa skill
 
