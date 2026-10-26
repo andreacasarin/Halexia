@@ -1,28 +1,35 @@
 # Halexia
 
-Halexia provides one Alexa skill with Smart Home and Custom conversation models, backed by the same AWS Lambda. Smart Home directives are forwarded to Home Assistant's Smart Home API. Custom requests are sent to Home Assistant's REST conversation API and answered by the selected conversation agent. The bridge does not translate prompts, turn Custom requests into device commands, or provide an arbitrary Alexa fallback for Smart Home.
+Halexia is source code for self-deployment of one Alexa skill with Smart Home and Custom conversation models, backed by the same AWS Lambda. Smart Home directives are forwarded to Home Assistant's Smart Home API. Custom requests are sent to Home Assistant's REST conversation API and answered by the selected conversation agent. The bridge does not translate prompts, turn Custom requests into device commands, or provide an arbitrary Alexa fallback for Smart Home.
+
+Each user creates and operates their own AWS Lambda function and Alexa skill, with account linking to their own Home Assistant instance; the project does not provide a shared Alexa skill for public use.
 
 Home Assistant remains responsible for exposed entities, Smart Home controls, and the conversation agent's instructions and permissions. Alexa account linking supplies the user's Home Assistant access token for each request.
 
-I built Halexia because I wanted a deeper conversation with my home through the Alexa devices I already own. My existing integration handled predefined commands, but I wanted to ask questions, understand what was happening, and request actions naturally.
+## Get the source
 
-Home Assistant’s own voice devices are appealing: their price supports privacy-focused hardware and helps fund a project that has given us so much. For me, reusing the microphones and speakers already around the house made more sense.
+When the GitHub repository is public, clone it over HTTPS:
 
-Inspired by the [community Alexa–Assist bridge](https://community.home-assistant.io/t/alexa-home-assistant-assist-bridge-let-your-echo-ask-questions-and-route-the-answers-into-assist/1016161), I extended my existing integration so ordinary controls still work while conversations reach Home Assistant’s AI. After testing and refining it, I separated the small bridge from my home configuration and called it Halexia.
+```sh
+git clone https://github.com/andreacasarin/Halexia.git
+cd Halexia
+```
+
+Alternatively, select **Code → Download ZIP** on the GitHub repository page and extract the archive.
 
 ## Build and deploy
 
-From the root of a standalone checkout, run:
+From the root of the checkout, build the Lambda package:
 
 ```sh
-python3 package.py
+python3 package.py --runtime-only
 ```
 
-This creates `dist/halexia.zip` for Lambda and `dist/halexia-source.zip` for the source distribution. The runtime ZIP retains `alexa_bridge/lambda_function.py`; the handler is `alexa_bridge.lambda_function.lambda_handler`. The flat source ZIP contains only `.gitignore`, `LICENSE`, `NOTICE`, `README.md`, both locale models, `lambda_function.py`, `package.py`, `test_bridge.py`, and `third_party/LICENSE`. The package builder does not include files outside this project folder.
+This creates `dist/halexia.zip` for Lambda. The runtime ZIP contains `alexa_bridge/lambda_function.py` and the bundled `alexa_bridge/LICENSE`; the handler is `alexa_bridge.lambda_function.lambda_handler`. If you also need a source export, run `python3 package.py` to create `dist/halexia-source.zip` alongside the runtime package.
 
-In AWS Lambda, choose Python 3.12 and set the handler to `alexa_bridge.lambda_function.lambda_handler`. Upload `dist/halexia.zip`. The bridge uses only Python's standard library. In **Configuration → General configuration → Edit**, set **Timeout** to **8 seconds**. AWS Lambda's default is 3 seconds; the bridge reserves about one second before its HTTP call, leaving roughly 2 seconds for Home Assistant at that default. The bridge's HTTP blocking timeout is up to 6 seconds, but this is not a strict end-to-end deadline. Alexa expects a response within its own response window, so use the 8-second Lambda setting and measure complete requests.
+In AWS Lambda, choose Python 3.12 and set the handler to `alexa_bridge.lambda_function.lambda_handler`. Upload `dist/halexia.zip`. The bridge uses only Python's standard library. Set the Lambda timeout to at least 8 seconds (AWS defaults to 3 seconds; see [AWS timeout settings](https://docs.aws.amazon.com/lambda/latest/dg/configuration-timeout.html)). A longer Lambda setting does not extend Alexa's roughly 8-second response window ([Alexa Smart Home guidance](https://developer.amazon.com/en-US/blogs/alexa/device-makers/2024/08/common-alexa-smart-home-errors); [progressive response reference](https://developer.amazon.com/en-US/docs/alexa/custom-skills/progressive-response-api-reference.html)). The bridge caps its Home Assistant HTTP call at 6 seconds and by remaining Lambda time minus about one second; these are not end-to-end deadlines. Measure complete requests in your deployment.
 
-Alternatively, paste the unchanged contents of `lambda_function.py` from the flat standalone checkout into the Lambda code editor as `lambda_function.py` and use the handler `lambda_function.lambda_handler`. Save and deploy the function after changing its code or environment.
+Alternatively, paste the unchanged contents of `lambda_function.py` from the source checkout into the Lambda code editor as `lambda_function.py` and use the handler `lambda_function.lambda_handler`. Save and deploy the function after changing its code or environment.
 
 Set these Lambda environment variables:
 
@@ -81,19 +88,17 @@ The bridge does not retry. A timeout or connection failure may occur after Home 
 
 ## Check locally
 
-From the root of the standalone checkout, run the tests:
+From the root of the checkout, run the tests:
 
 ```sh
 python3 -m unittest discover -s . -p 'test_*.py'
 ```
 
-To build only the Lambda ZIP, run `python3 package.py --runtime-only`. A single Italian read-only conversation round trip was manually confirmed in the current setup. This does not validate other locales, Smart Home actions, Home Assistant outage behavior, or the house's physical controls.
+A single Italian read-only conversation round trip was manually confirmed in the current setup. This does not validate other locales, Smart Home actions, Home Assistant outage behavior, or the house's physical controls.
 
-## Standalone project and license
+## License
 
-For a future public GitHub repository, create a new empty folder named `halexia` and extract only `dist/halexia-source.zip` into it. Create the repository from that extracted folder; do not copy the development folder or its Git history. The source ZIP is the package builder's allowlisted set of files. This preparation does not publish the repository, Alexa Store skill, or a hosted multi-house service.
-
-The project is licensed under Apache License 2.0 as stated in [LICENSE](LICENSE). The adapted Smart Home flow retains Jason Hu's 2019 attribution and Apache 2.0 terms in [NOTICE](NOTICE) and [third_party/LICENSE](third_party/LICENSE).
+Halexia is licensed under Apache License 2.0; see [LICENSE](LICENSE).
 
 ## References
 

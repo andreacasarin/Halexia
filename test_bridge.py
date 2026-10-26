@@ -495,12 +495,12 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("grant-correlation", json.dumps(result))
 
     def test_package_allowlists_are_explicit_and_archives_reproducible(self):
-        self.assertEqual(package_builder.RUNTIME_FILES, ("lambda_function.py",))
-        self.assertEqual(len(package_builder.SOURCE_FILES), 10)
+        self.assertEqual(package_builder.RUNTIME_FILES, ("LICENSE", "lambda_function.py"))
+        self.assertEqual(len(package_builder.SOURCE_FILES), 8)
         self.assertEqual(set(package_builder.SOURCE_FILES), {
-            ".gitignore", "LICENSE", "NOTICE", "README.md",
+            ".gitignore", "LICENSE", "README.md",
             "interaction_models/en-GB.json", "interaction_models/it-IT.json",
-            "lambda_function.py", "package.py", "test_bridge.py", "third_party/LICENSE",
+            "lambda_function.py", "package.py", "test_bridge.py",
         })
         for filename in package_builder.RUNTIME_FILES + package_builder.SOURCE_FILES:
             self.assertNotIn("..", Path(filename).parts)
@@ -512,7 +512,7 @@ class BridgeTests(unittest.TestCase):
             package_builder._write_archive(second, package_builder.RUNTIME_FILES, prefix="alexa_bridge/")
             self.assertEqual(first.read_bytes(), second.read_bytes())
             with zipfile.ZipFile(first) as archive:
-                self.assertEqual(archive.namelist(), ["alexa_bridge/lambda_function.py"])
+                self.assertEqual(archive.namelist(), ["alexa_bridge/LICENSE", "alexa_bridge/lambda_function.py"])
 
     def test_package_build_uses_its_own_folder_and_flat_source_entries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -531,7 +531,7 @@ class BridgeTests(unittest.TestCase):
             runtime = copied / "dist" / "halexia.zip"
             source = copied / "dist" / "halexia-source.zip"
             with zipfile.ZipFile(runtime) as archive:
-                self.assertEqual(archive.namelist(), ["alexa_bridge/lambda_function.py"])
+                self.assertEqual(archive.namelist(), ["alexa_bridge/LICENSE", "alexa_bridge/lambda_function.py"])
             with zipfile.ZipFile(source) as archive:
                 self.assertEqual(archive.namelist(), sorted(package_builder.SOURCE_FILES))
 

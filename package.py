@@ -7,18 +7,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
-RUNTIME_FILES = ("lambda_function.py",)
+RUNTIME_FILES = ("LICENSE", "lambda_function.py")
 SOURCE_FILES = (
     ".gitignore",
     "LICENSE",
-    "NOTICE",
     "README.md",
     "interaction_models/en-GB.json",
     "interaction_models/it-IT.json",
     "lambda_function.py",
     "package.py",
     "test_bridge.py",
-    "third_party/LICENSE",
 )
 
 
