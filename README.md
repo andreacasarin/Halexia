@@ -11,6 +11,8 @@ A self-deployed Alexa skill bridge for Home Assistant. Smart Home directives go 
 
 Each user creates and operates their own AWS Lambda function and Alexa skill, linked to their own Home Assistant instance. This repository provides source code for self-deployment, not a shared Alexa skill.
 
+> **AI conversations require a fast backend.** Alexa needs a complete response within roughly 8 seconds. A model that works in Home Assistant can still be too slow through Alexa, especially with Home Assistant control enabled. Increasing the Lambda timeout does not give the model more time to answer Alexa.
+
 ## Request flow
 
 ```mermaid
@@ -24,6 +26,16 @@ flowchart LR
 ```
 
 Smart Home handles ordinary device controls directly. Custom requests go to the selected Home Assistant conversation agent, which may use AI; the bridge does not require or provide an AI model.
+
+## Conversation response requirements
+
+Choose and test the conversation agent on the hardware you will actually use. A small model or a fast first token does not guarantee a timely, correct answer: Halexia waits for Home Assistant's complete response before replying to Alexa.
+
+- **Allow time for the whole request.** Network access, model loading, input processing, answer generation, and any tool calls all add latency. The bridge uses a 6-second HTTP socket timeout, which can be shortened by remaining Lambda time; this is not a strict end-to-end deadline. Aim comfortably below that budget and verify through Alexa. [Alexa's response window](https://developer.amazon.com/en-US/docs/alexa/custom-skills/progressive-response-api-reference.html) remains roughly 8 seconds.
+- **Check tool support before enabling control.** For Ollama, **Control Home Assistant → Assist** requires a model that supports tool calling. Tool definitions, exposed entity information, conversation history, and additional model passes after tool results can increase latency. Tool support alone does not guarantee reliable device selection or Italian/English answers. See [Home Assistant's Ollama guidance](https://www.home-assistant.io/integrations/ollama/).
+- **Conversation-only is a valid setup.** With Ollama control disabled, general questions still work, but that agent cannot inspect or control Home Assistant entities. Ordinary Alexa Smart Home commands use the separate Smart Home route shown above. For latency-sensitive use, keep **Think before responding** off; keeping a model loaded can reduce loading delays but cannot fix slow inference.
+
+Before relying on a model, time several fresh read-only greetings in Home Assistant and then through Alexa, including after an idle period. Test follow-up questions and the languages you intend to use. If enabling control, start with a small set of exposed entities and repeat read-only tests without requesting physical actions. A quick greeting with control disabled does not establish performance with tools enabled. No particular model or hardware configuration is guaranteed to meet Alexa's deadline.
 
 ## Voice models
 
@@ -122,6 +134,7 @@ The spoken Custom connection error is generic and may occur before the HTTP time
 | `http_error`, status `401` | Relink the Alexa account. |
 | `http_error`, status `403` | Home Assistant denied permission. |
 | `http_error`, status `400` | Check `AGENT_ID` and Home Assistant; the status alone does not identify the cause. |
+| `http_error`, status `500` | Inspect Home Assistant and model-provider logs at the same time. For Ollama, check whether control is enabled with a model that lacks tool support. A fast HTTP error is not a timeout. |
 | `timeout`, `tls_error`, `connection_error` | Check request duration, Home Assistant availability, certificate validity, and Lambda network access. |
 | `invalid_json` | Home Assistant returned invalid JSON. |
 | `unusable_speech` | Check the selected agent and Home Assistant response. |
