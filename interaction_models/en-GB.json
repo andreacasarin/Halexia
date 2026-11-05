@@ -5,16 +5,41 @@
       "intents": [
         {
           "name": "AskHomeIntent",
-          "slots": [{"name": "query", "type": "AMAZON.SearchQuery"}],
+          "slots": [
+            {
+              "name": "query",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
           "samples": [
             "ask {query}",
             "question {query}"
           ]
         },
-        {"name": "AMAZON.HelpIntent", "samples": []},
-        {"name": "AMAZON.StopIntent", "samples": []},
-        {"name": "AMAZON.CancelIntent", "samples": []},
-        {"name": "AMAZON.FallbackIntent", "samples": []}
+        {
+          "name": "AnswerStatusIntent",
+          "samples": [
+            "is it ready",
+            "do you have the answer",
+            "tell me the answer"
+          ]
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        }
       ]
     }
   }

@@ -1,94 +1,78 @@
 # Halexia
 
-A self-deployed Alexa skill bridge for Home Assistant. Smart Home directives go to Home Assistant's Smart Home API; Custom requests go to its conversation API and are answered by the selected conversation agent. Halexia does not translate prompts, turn Custom requests into device commands, or provide an arbitrary Alexa fallback for Smart Home.
+A self-deployed Alexa Smart Home and Custom skill bridge for Home Assistant, using Python 3.12. Alexa handles both speech recognition and speech synthesis. No Piper, Whisper, audio streaming, Home Assistant changes, or inference-stack changes are needed.
 
-**Self-hosted** · **Alexa Smart Home + Custom** · **Home Assistant** · **Python 3.12**
-
-[![Apache 2.0 license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-![AWS Lambda Python 3.12](https://img.shields.io/badge/AWS%20Lambda-Python%203.12-orange)
-[![Voice models: en-GB and it-IT](https://img.shields.io/badge/voice%20models-en--GB%20and%20it--IT-blue)](interaction_models/)
-[![CI](https://github.com/andreacasarin/Halexia/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/andreacasarin/Halexia/actions/workflows/ci.yml)
-
-Each user creates and operates their own AWS Lambda function and Alexa skill, linked to their own Home Assistant instance. This repository provides source code for self-deployment, not a shared Alexa skill.
-
-> **AI conversations require a fast backend.** Alexa needs a complete response within roughly 8 seconds. A model that works in Home Assistant can still be too slow through Alexa, especially with Home Assistant control enabled. Increasing the Lambda timeout does not give the model more time to answer Alexa.
+Each operator deploys their own AWS resources and links their own Home Assistant account. This repository is not a shared Alexa skill.
 
 ## Request flow
 
 ```mermaid
 flowchart LR
-    A[Alexa skill] --> L[Your AWS Lambda]
-    L -->|Smart Home directive| S["Home Assistant Smart Home API<br/>/api/alexa/smart_home"]
-    S --> L
-    L -->|Custom intent| C["Home Assistant conversation API<br/>/api/conversation/process"]
-    C --> L
-    L -->|Alexa response| A
+    A[Alexa] --> B[Bridge Lambda]
+    B -->|Smart Home directives, unchanged| H[Home Assistant Smart Home API]
+    B -->|reserve / poll| D[(Temporary DynamoDB jobs)]
+    B -->|asynchronous Invoke| W[Worker Lambda]
+    W -->|conversation/process| C[Home Assistant conversation agent]
+    W -->|save answer / status| D
+    B -->|answer or pending acknowledgement| A
 ```
 
-Smart Home handles ordinary device controls directly. Custom requests go to the selected Home Assistant conversation agent, which may use AI; the bridge does not require or provide an AI model.
+Every Custom question starts one independent worker invocation. The bridge briefly polls for its completed answer: fast inference still produces a direct spoken answer. If inference takes longer, Alexa says **“I’m preparing the answer. In a few seconds, ask me: is it ready?”** The user must request the result; Halexia never makes Alexa speak later automatically. Progressive responses do not extend Alexa's approximately eight-second response window ([Alexa documentation](https://developer.amazon.com/en-US/docs/alexa/custom-skills/send-the-user-a-progressive-response.html)).
 
-## Conversation response requirements
+The bridge's initial-question response budget defaults to five seconds, including AWS dispatch and polling. Each result/status request, such as **“is it ready?”**, waits up to five additional seconds for the same job to finish and returns the answer as soon as it is available. A status request has a 6.6-second total application budget, reserving time for storage reads and returning the saved result; cold startup and remaining Lambda time can shorten the polling window. If the job is still unfinished, Alexa says **“The answer isn’t ready yet. In a few seconds, ask me again: is it ready?”**, keeps the session open, and includes a fixed Alexa reprompt reminding the user what to say if they remain silent. The reprompt is only a reminder, never automatic delivery of a completed answer. Status checks never restart inference or extend the worker's processing deadline. AWS SDK calls have short connection/read timeouts and no automatic retries. This is an application budget, not a guarantee about DNS, cold starts, AWS scheduling, network delivery, or Alexa's full round trip. Measure acknowledgement latency separately from worker duration in your deployment.
 
-Choose and test the conversation agent on the hardware you will actually use. A small model or a fast first token does not guarantee a timely, correct answer: Halexia waits for Home Assistant's complete response before replying to Alexa.
+The worker runs independently for up to 120 seconds. Its Home Assistant HTTP socket timeout is 110 seconds, shortened by remaining worker time; the Lambda timeout supplies the overall execution bound. A job still queued or running after 180 seconds reports explicit failure, including if a worker was killed or never delivered. Home Assistant may continue a request after a network timeout; Halexia never retries it automatically or claims an action succeeded without an answer.
 
-- **Allow time for the whole request.** Network access, model loading, input processing, answer generation, and any tool calls all add latency. The bridge uses a 6-second HTTP socket timeout, which can be shortened by remaining Lambda time; this is not a strict end-to-end deadline. Aim comfortably below that budget and verify through Alexa. [Alexa's response window](https://developer.amazon.com/en-US/docs/alexa/custom-skills/progressive-response-api-reference.html) remains roughly 8 seconds.
-- **Check tool support before enabling control.** For Ollama, **Control Home Assistant → Assist** requires a model that supports tool calling. Tool definitions, exposed entity information, conversation history, and additional model passes after tool results can increase latency. Tool support alone does not guarantee reliable device selection or Italian/English answers. See [Home Assistant's Ollama guidance](https://www.home-assistant.io/integrations/ollama/).
-- **Conversation-only is a valid setup.** With Ollama control disabled, general questions still work, but that agent cannot inspect or control Home Assistant entities. Ordinary Alexa Smart Home commands use the separate Smart Home route shown above. For latency-sensitive use, keep **Think before responding** off; keeping a model loaded can reduce loading delays but cannot fix slow inference.
-
-Before relying on a model, time several fresh read-only greetings in Home Assistant and then through Alexa, including after an idle period. Test follow-up questions and the languages you intend to use. If enabling control, start with a small set of exposed entities and repeat read-only tests without requesting physical actions. A quick greeting with control disabled does not establish performance with tools enabled. No particular model or hardware configuration is guaranteed to meet Alexa's deadline.
+Smart Home directives keep the existing synchronous route to `/api/alexa/smart_home`, with the existing six-second HTTP socket timeout and authorization/error behavior. They do not create jobs or require Custom configuration.
 
 ## Voice models
 
-English is the original/default model. Italian is its translation. Both models use the same `AskHomeIntent` and a `query` slot.
+**English (`en-GB`) is the bridge default**, with Italian (`it-IT`) supported alongside it. Alexa’s request locale selects the language. If the locale is absent, the bridge uses `en-GB`, including for the Home Assistant request; bridge prompts fall back to English for unsupported languages. Home Assistant answers use the forwarded request locale and are not translated by Halexia.
 
-| Language | Locale | Invocation | Request phrases |
+| Locale | Invocation | Question | Retrieve answer |
 | --- | --- | --- | --- |
-| English (original/default) | `en-GB` | `home assistant` | `ask {query}`, `question {query}` |
-| Italian (translation) | `it-IT` | `assistente casa` | `chiedi {query}`, `domanda {query}` |
+| `en-GB` | `home assistant` | `ask {query}`, `question {query}` | `is it ready`, `do you have the answer`, `tell me the answer` |
+| `it-IT` | `assistente casa` | `chiedi {query}`, `domanda {query}` | `è pronta`, `hai la risposta`, `dimmi la risposta` |
 
-### Example
+Import and build both JSON models in `interaction_models/`. `AskHomeIntent` retains its `AMAZON.SearchQuery` slot; `AnswerStatusIntent` has no slots and never forwards a new question to Home Assistant. The five-second status wait, pending messages, and reprompts are Lambda behavior with English and Italian translations: updating that behavior does not require another model import/build when `AnswerStatusIntent` is already present and built for that locale.
 
-English: say **“Alexa, open home assistant.”** After Alexa responds, say **“ask what time is it.”**
+English example: **“Alexa, open home assistant”**, then **“ask what is the temperature in the study”**. For a slow answer, say **“is it ready?”** after the acknowledgement. If the listening window has closed, reopen **home assistant**, then say **“tell me the answer”**.
 
-Italian translation: say **“Alexa, apri assistente casa.”** After Alexa responds, say **“chiedi che ora è.”**
+Italian example: **“Alexa, apri assistente casa”**, then **“chiedi qual è la temperatura in studio”**, followed by **“è pronta?”** if the answer is pending. To retrieve it after the session closes, reopen **assistente casa**, then say **“dimmi la risposta”**. A new Launch request does not reset the retained conversation or start inference.
 
-## Get the source
+## Job and conversation policy
 
-When the GitHub repository is public, clone it over HTTPS:
+- One active question per Alexa user, skill, and account-link credential. A second question while processing is rejected explicitly; it is not queued or silently replayed. A completed answer must be retrieved before another question is accepted. Stop/Cancel closes the skill session; it does not cancel inference.
+- Once an answer has been returned, repeated result requests replay it until expiry or the next accepted question. Returning an answer marks it retrieved, even if Alexa's delivery subsequently fails. A newer question replaces that result.
+- Results, conversation IDs, and deduplication markers are retained for 15 minutes from job creation (rejected-request markers for 15 minutes from rejection). Expired items are ignored even before DynamoDB physically deletes them. TTL deletion is eventual ([AWS TTL guidance](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ttl-expired-items.html)). No available/expired result is reported explicitly; status requests never rerun inference.
+- Accepted Alexa request IDs are recorded atomically with the current job. Duplicate invocations reuse that job; duplicates of replaced requests report no available result. Rejected request IDs retain their rejection. Questions older than five minutes, or over 30 seconds in the future, are rejected, so old delivery cannot restart inference after deduplication records expire. Deliberately asking the same words again with a new Alexa request ID is a new question.
+- A worker must atomically claim `QUEUED → RUNNING` before contacting Home Assistant. Duplicate delivery cannot reclaim it. Lambda asynchronous delivery can duplicate events even with error retries disabled ([AWS delivery semantics](https://docs.aws.amazon.com/lambda/latest/dg/invocation-async-error-handling.html)). There is no automatic retry after claim: a crash between claim and HTTP submission may mean no inference happened; a crash after submission may mean Home Assistant is still processing. Both fail explicitly by the processing deadline.
+- A failed job can be replaced by an explicitly new question. Failed results are replayable until replaced/expired. HTTP 401 prompts account linking; 403 reports lack of permission. Other failures never fabricate speech or silently repeat a question.
+- The worker saves Home Assistant's conversation ID with its answer. The next accepted question reuses it, including across Alexa sessions. If Home Assistant omits a new ID, the prior ID is retained. Conversation context expires with the job; client-supplied session attributes are not trusted to select stored jobs or conversation context.
+
+## Authorization and credentials
+
+Custom requests require Alexa's linked Home Assistant bearer token, Alexa user ID, application ID matching `SKILL_ID`, and a request ID. Both Lambda triggers must be restricted to that skill. The storage namespace is a SHA-256 digest of skill ID, Alexa user ID, and account-link credential. Another user, another skill, or another credential cannot retrieve the job, even with a copied job ID or session attributes.
+
+A token refresh or relink starts a fresh namespace: older jobs and conversation IDs become unavailable, and expire normally. This deliberately avoids exposing an old account's answer after relinking. No refresh token or shared Home Assistant service token is needed.
+
+The raw access token and question travel only in the asynchronous worker invocation event and worker memory, not in DynamoDB, session attributes, environment variables, or logs. Lambda temporarily retains that event in its managed asynchronous queue, bounded to 60 seconds of queue age, plus execution time. There is no durable credential store, DLQ, or failure destination copying event payloads. DynamoDB stores the private answer and conversation ID encrypted at rest, with automatic TTL. Restrict IAM access to the table and functions. Never enable full-event logging or SDK debug logging.
+
+## Build, deploy, and verify
+
+**Upgrade notice:** Custom requests now require a separate worker Lambda and temporary DynamoDB storage. Existing single-Lambda installations must follow the existing-Lambda upgrade steps before using this runtime. Keep the current Home Assistant account link and Smart Home endpoint.
+
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for exact new-install and existing-Lambda upgrade steps, resources, IAM, settings, rollback, latency measurement, and the real-Echo acceptance procedure. Uploading the old single Lambda alone is no longer sufficient for Custom requests.
 
 ```sh
-git clone https://github.com/andreacasarin/Halexia.git
-cd Halexia
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s . -p 'test_*.py'
+.venv/bin/cfn-lint deployment.yaml
+python3 package.py
 ```
 
-Or select **Code → Download ZIP** on the GitHub repository page and extract the archive.
-
-## Build and deploy
-
-From the checkout root, create the Lambda runtime package:
-
-```sh
-python3 package.py --runtime-only
-```
-
-This creates `dist/halexia.zip`. In AWS Lambda, choose Python 3.12, upload that ZIP, and set the handler to `alexa_bridge.lambda_function.lambda_handler`. The handler uses only Python's standard library. The runtime ZIP contains `alexa_bridge/lambda_function.py` and the bundled `alexa_bridge/LICENSE`. If you also need a source export, `python3 package.py` creates `dist/halexia-source.zip` alongside the runtime package.
-
-The Lambda timeout should be at least 8 seconds (AWS defaults to 3 seconds; see [AWS timeout settings](https://docs.aws.amazon.com/lambda/latest/dg/configuration-timeout.html)). A longer Lambda timeout does not extend Alexa's roughly 8-second response window ([Alexa Smart Home guidance](https://developer.amazon.com/en-US/blogs/alexa/device-makers/2024/08/common-alexa-smart-home-errors); [progressive response reference](https://developer.amazon.com/en-US/docs/alexa/custom-skills/progressive-response-api-reference.html)). The bridge caps its Home Assistant HTTP call at 6 seconds and by remaining Lambda time minus about one second; these are not end-to-end deadlines. Measure complete requests in your deployment.
-
-You can also paste the unchanged `lambda_function.py` from the source checkout into the Lambda code editor and use the handler `lambda_function.lambda_handler`. Save and deploy after changing code or environment.
-
-### Lambda settings
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `BASE_URL` | Yes | HTTPS Home Assistant base URL, with no path, query, or fragment. Shared by both models. |
-| `AGENT_ID` | For Custom | Conversation entity ID for the agent to use. |
-
-Alexa and Lambda need trusted HTTPS access to the Home Assistant host on port 443. The bridge always sends `AGENT_ID`; Home Assistant's REST `conversation.process` API uses its built-in agent only when `agent_id` is omitted. It does not automatically select the preferred Assist pipeline, which uses a WebSocket conversation flow this bridge does not implement.
-
-### Lambda diagnostics
-
-Set `DEBUG=1` to enable sanitized Custom failure warnings. Any non-empty value enables them, including `DEBUG=0`; remove the variable or leave it empty to disable diagnostics. Warnings include only fixed categories and numeric HTTP status or configuration key names. They do not include requests, responses, URLs, headers, questions, speech, tokens, or exception details.
+`dist/halexia.zip` is the deterministic runtime archive, containing `alexa_bridge/lambda_function.py` and `alexa_bridge/LICENSE`. Use `alexa_bridge.lambda_function.lambda_handler` for the bridge and `alexa_bridge.lambda_function.worker_handler` for the worker. Both use the same package. The AWS Python runtime includes Boto3; the runtime archive adds no dependencies ([AWS packaging documentation](https://docs.aws.amazon.com/lambda/latest/dg/python-package.html)). `dist/halexia-source.zip` includes source, models, tests, and deployment instructions. Use `python3 package.py --runtime-only` to build only the runtime.
 
 ## CI and releases
 
@@ -98,9 +82,7 @@ When a `v*` version tag is pushed, the release workflow tests and builds that ta
 
 ## Configure the Alexa skill
 
-1. Use one Alexa Smart Home skill. Configure its Smart Home model for `it-IT` and `en-GB`. Under **MODELS**, add a Custom model for each locale, import the matching JSON files from `interaction_models/`, and build both models.
-2. Set the same Lambda ARN as the Smart Home and Custom endpoint.
-3. Enable both the **Alexa Smart Home** and **Alexa Skills Kit** Lambda triggers, each restricted to the same skill ID.
+Use one Alexa Smart Home skill with Custom models for `it-IT` and `en-GB`. Set the **bridge ARN** as both Smart Home and Custom endpoint. Give the bridge both Alexa Smart Home and Alexa Skills Kit triggers, restricted to the same skill ID. The worker has no Alexa trigger or public endpoint. An existing-Lambda upgrade retains the endpoint ARN and existing triggers.
 
 ### Home Assistant account linking
 
@@ -121,35 +103,17 @@ For a new Custom model that needs account linking, configure **Auth Code Grant**
 
 Keep the trailing slash on the Client ID and choose the value for your Alexa region. Leave the domain list and default access-token expiration blank. Turn off **Allow users to enable skill without account linking**. Home Assistant currently does not enforce the `intent` scope for Custom conversation. If prompted about PKCE, follow compatibility instructions for your installed Home Assistant version. The authorization and token URLs must use the same trusted HTTPS Home Assistant host.
 
-## Operation and troubleshooting
+## Diagnostics
 
-Smart Home directives are forwarded unchanged to `<BASE_URL>/api/alexa/smart_home`. The bearer token is read from Alexa's `endpoint.scope`, `payload.grantee`, or `payload.scope` field when present. Custom requests go to `<BASE_URL>/api/conversation/process` with the Alexa locale, `AGENT_ID`, and conversation context. Home Assistant's Smart Home integration and conversation agent are separate controls.
+The deployment enables INFO application logging. `custom_job` lines contain only a random job ID, a hashed Alexa request ID, fixed status, and elapsed milliseconds. Compare the bridge's `FRONTEND_RETURN` with the worker's `RUNNING` and `DONE`/`FAILED` lines for that job. `AWS_FAILURE`, `WORKER_FAILURE`, and `STALE_COMPLETION` indicate dispatch/storage failures or a completion rejected after its deadline/replacement. Additional `custom_request` lines record only a hashed request ID, a whitelisted request type/intent, whitelisted session-end reason/error code, and numeric request age. `custom_wait` records when a wait returned pending. These distinguish an unrecognized phrase, a normally closed session, an Alexa endpoint timeout, and a backend wait. `SessionEndedRequest` returns no speech, as required by Alexa. Do not share full AWS events, table contents, or private speech.
 
-The spoken Custom connection error is generic and may occur before the HTTP timeout expires. To investigate, set `DEBUG=1`, save the Lambda setting, deploy the current package, and ask a read-only question. Check the latest invocation in **CloudWatch → Log groups → `/aws/lambda/<function-name>`** for a `custom_failure` line.
+Set `DEBUG=1` on the worker for sanitized Home Assistant failure categories. Any nonempty string, including `0`, enables these warnings; unset it to disable them. Categories are `http_error` (numeric status only), `timeout`, `tls_error`, `connection_error`, `invalid_json`, `unusable_speech`, or configuration errors. No exception details, URLs, credentials, questions, or answers are logged. Missing configuration warnings on the bridge use the same gate. A fast HTTP failure is distinct from slow inference; inspect Home Assistant separately when needed.
 
-| Log category | What to check |
-| --- | --- |
-| `missing_config` | Add the named `BASE_URL` or `AGENT_ID` variable. |
-| `invalid_base_url` | Use a plain HTTPS base URL without path, query, or fragment. |
-| `http_error`, status `401` | Relink the Alexa account. |
-| `http_error`, status `403` | Home Assistant denied permission. |
-| `http_error`, status `400` | Check `AGENT_ID` and Home Assistant; the status alone does not identify the cause. |
-| `http_error`, status `500` | Inspect Home Assistant and model-provider logs at the same time. For Ollama, check whether control is enabled with a model that lacks tool support. A fast HTTP error is not a timeout. |
-| `timeout`, `tls_error`, `connection_error` | Check request duration, Home Assistant availability, certificate validity, and Lambda network access. |
-| `invalid_json` | Home Assistant returned invalid JSON. |
-| `unusable_speech` | Check the selected agent and Home Assistant response. |
+## Validation status
 
-The bridge does not retry. A timeout or connection failure may occur after Home Assistant received a request, so check Home Assistant before repeating a command that may have changed device state. Remove or unset `DEBUG` after troubleshooting. Share only the sanitized `custom_failure` line when asking for help; never enable full-event logging.
+The 45-test local suite covers job lifecycle and timing, duplicates, failures, expiry, isolation, conversation continuity, English defaults, Italian responses, safe diagnostics, Smart Home forwarding, and deterministic packaging. Moto exercises DynamoDB conditions and transactions; live AWS checks separately verified dispatch, timeout/TTL settings, authorization errors, isolation, and repeated five-second pending responses.
 
-## Verification
-
-Run the local test suite from the checkout root:
-
-```sh
-python3 -m unittest discover -s . -p 'test_*.py'
-```
-
-One Italian read-only conversation round trip has been manually confirmed in the current setup. This does not verify the English model, other locales, Smart Home actions, Home Assistant outage behavior, or physical controls.
+The Italian slow-answer flow was verified in the Alexa simulator and reported working on a physical Echo by the operator. The acknowledgement returned before the worker finished, and follow-up requests retrieved the same job’s result without another inference. Live English-device testing and the remaining manual deployment checks are not independently confirmed. See [DEPLOYMENT.md](DEPLOYMENT.md) for the validation record and acceptance procedure.
 
 ## License
 

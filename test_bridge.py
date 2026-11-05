@@ -1,7 +1,6 @@
 import json
 import os
 import shutil
-import ssl
 import subprocess
 import sys
 import tempfile
@@ -9,22 +8,10 @@ import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 
 import lambda_function as bridge
 import package as package_builder
-
-
-def ask_event(text="Turn on the hallway lights", locale="en-GB", attrs=None, new=False):
-    return {
-        "context": {"System": {"user": {"accessToken": "request-token"}}},
-        "session": {"new": new, "attributes": attrs or {}},
-        "request": {
-            "type": "IntentRequest",
-            "locale": locale,
-            "intent": {"name": "AskHomeIntent", "slots": {"query": {"value": text}}},
-        },
-    }
 
 
 def smart_home_event(name="Discover", token="smart-token", namespace="Alexa.Discovery", endpoint=True):
@@ -79,261 +66,6 @@ class BridgeTests(unittest.TestCase):
 
     def tearDown(self):
         self.env.stop()
-
-    def test_forwards_exact_text_locale_agent_and_existing_context(self):
-        opener = unittest.mock.Mock()
-        opener.open.return_value = FakeHTTPResponse(json.dumps({
-            "response": {"speech": {"plain": {"speech": "Done"}}},
-            "conversation_id": "conv-2",
-        }).encode())
-        with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-            result = bridge.lambda_handler(ask_event("  tell me exactly  ", "it-IT", {"conversation_id": "conv-1"}), Context())
-        request, timeout = opener.open.call_args.args[0], opener.open.call_args.kwargs["timeout"]
-        self.assertEqual(request.full_url, "https://ha.example/api/conversation/process")
-        self.assertEqual(request.get_header("Authorization"), "Bearer request-token")
-        self.assertEqual(json.loads(request.data), {
-            "text": "  tell me exactly  ", "language": "it-IT", "agent_id": "conversation.test_agent",
-            "conversation_id": "conv-1",
-        })
-        self.assertEqual(timeout, 3.2)
-        self.assertEqual(result["response"]["outputSpeech"], {"type": "PlainText", "text": "Done"})
-        self.assertEqual(result["sessionAttributes"], {"conversation_id": "conv-2"})
-        self.assertNotIn("request-token", json.dumps(result))
-
-    def test_access_token_is_per_invocation_and_legacy_environment_is_ignored(self):
-        opener = unittest.mock.Mock()
-        opener.open.side_effect = [
-            FakeHTTPResponse(b'{"response":{"speech":{"plain":{"speech":"One"}}}}'),
-            FakeHTTPResponse(b'{"response":{"speech":{"plain":{"speech":"Two"}}}}'),
-        ]
-        with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-            for token in ("user-one", "user-two"):
-                event = ask_event()
-                event["context"]["System"]["user"]["accessToken"] = token
-                bridge.lambda_handler(event, Context())
-        self.assertEqual(
-            [call.args[0].get_header("Authorization") for call in opener.open.call_args_list],
-            ["Bearer user-one", "Bearer user-two"],
-        )
-
-    def test_new_session_does_not_forward_old_context(self):
-        opener = unittest.mock.Mock()
-        opener.open.return_value = FakeHTTPResponse(b'{"response":{"speech":{"plain":{"speech":"Hi"}}}}')
-        with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-            bridge.lambda_handler(ask_event(attrs={"conversation_id": "old"}, new=True), Context())
-        self.assertNotIn("conversation_id", json.loads(opener.open.call_args.args[0].data))
-
-    def test_new_session_does_not_return_old_context_on_failure(self):
-        opener = unittest.mock.Mock()
-        opener.open.side_effect = TimeoutError()
-        with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-            result = bridge.lambda_handler(ask_event(attrs={"conversation_id": "old"}, new=True), Context())
-        self.assertNotIn("sessionAttributes", result)
-
-    def test_missing_slot_makes_no_request(self):
-        event = ask_event(None)
-        event["request"]["intent"]["slots"] = {}
-        with patch.object(bridge.urllib.request, "build_opener") as opener:
-            result = bridge.lambda_handler(event, Context())
-        opener.assert_not_called()
-        self.assertIn("didn't get", result["response"]["outputSpeech"]["text"])
-
-    def test_missing_or_malformed_access_token_requests_link_without_network(self):
-        for token in (None, "", "  ", "abc def", "abc\nxyz", "café", 42, [], {}):
-            event = ask_event(attrs={"conversation_id": "old"})
-            if token is None:
-                del event["context"]["System"]["user"]["accessToken"]
-            else:
-                event["context"]["System"]["user"]["accessToken"] = token
-            with self.subTest(token=token), patch.object(bridge.urllib.request, "build_opener") as opener:
-                result = bridge.lambda_handler(event, Context())
-            opener.assert_not_called()
-            self.assertEqual(result["response"]["card"], {"type": "LinkAccount"})
-            self.assertNotIn("sessionAttributes", result)
-            self.assertNotIn("old", json.dumps(result))
-
-        for alexa_context in (None, [], {"System": None}, {"System": {"user": []}}):
-            event = ask_event()
-            event["context"] = alexa_context
-            with self.subTest(context=alexa_context), patch.object(bridge.urllib.request, "build_opener") as opener:
-                result = bridge.lambda_handler(event, Context())
-            opener.assert_not_called()
-            self.assertEqual(result["response"]["card"], {"type": "LinkAccount"})
-
-    def test_unauthorized_requests_relink_once_and_forbidden_is_distinct(self):
-        for status, expect_card in ((401, True), (403, False)):
-            with self.subTest(status=status):
-                opener = unittest.mock.Mock()
-                opener.open.side_effect = HTTPError("https://ha.example", status, "denied", {}, None)
-                with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-                    result = bridge.lambda_handler(ask_event(attrs={"conversation_id": "old"}), Context())
-                opener.open.assert_called_once()
-                self.assertEqual("card" in result["response"], expect_card)
-                self.assertNotIn("sessionAttributes", result)
-                self.assertNotIn("request-token", json.dumps(result))
-                if expect_card:
-                    self.assertEqual(result["response"]["card"], {"type": "LinkAccount"})
-                else:
-                    self.assertIn("not allowed", result["response"]["outputSpeech"]["text"])
-
-    def test_custom_logs_missing_and_invalid_configuration_without_network(self):
-        for env, expected in (
-            ({"AGENT_ID": "conversation.test_agent"}, "category=missing_config config=BASE_URL"),
-            ({"BASE_URL": "https://ha.example"}, "category=missing_config config=AGENT_ID"),
-            ({"BASE_URL": "http://private-host", "AGENT_ID": "conversation.test_agent"}, "category=invalid_base_url config=BASE_URL"),
-        ):
-            with self.subTest(expected=expected), patch.dict(os.environ, {**env, "DEBUG": "1"}, clear=True), patch.object(bridge.urllib.request, "build_opener") as opener:
-                with self.assertLogs(bridge.LOGGER, level="WARNING") as captured:
-                    bridge.lambda_handler(ask_event(), Context())
-            opener.assert_not_called()
-            self.assertEqual(len(captured.output), 1)
-            self.assertIn(expected, captured.output[0])
-
-    def test_custom_logs_http_status_without_request_or_exception_secrets(self):
-        event = ask_event("private-question", attrs={"conversation_id": "private-conversation"})
-        event["context"]["System"]["user"]["accessToken"] = "private-access-token"
-        opener = unittest.mock.Mock()
-        opener.open.side_effect = HTTPError(
-            "https://private-host/private-url-token", 400, "private-exception-message",
-            {"X-Private": "private-header-value"}, None,
-        )
-        with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-            with self.assertLogs(bridge.LOGGER, level="WARNING") as captured:
-                result = bridge.lambda_handler(event, Context())
-        opener.open.assert_called_once()
-        self.assertIn("category=http_error status=400", captured.output[0])
-        for private_value in (
-            "private-question", "private-conversation", "private-access-token", "private-host",
-            "private-url-token", "private-exception-message", "private-header-value",
-        ):
-            self.assertNotIn(private_value, captured.output[0])
-        self.assertIn("can't confirm whether the action was carried out", result["response"]["outputSpeech"]["text"])
-
-    def test_debug_env_gates_sanitized_logs_using_nonempty_string_semantics(self):
-        results = []
-        for debug_value in (None, ""):
-            opener = unittest.mock.Mock()
-            opener.open.side_effect = HTTPError("https://private-host", 400, "private failure", {}, None)
-            with patch.dict(os.environ):
-                if debug_value is None:
-                    os.environ.pop("DEBUG", None)
-                else:
-                    os.environ["DEBUG"] = debug_value
-                with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-                    with patch.object(bridge.LOGGER, "warning") as warning:
-                        results.append(bridge.lambda_handler(ask_event(), Context()))
-            warning.assert_not_called()
-            opener.open.assert_called_once()
-
-        opener = unittest.mock.Mock()
-        opener.open.side_effect = HTTPError("https://private-host", 400, "private failure", {}, None)
-        with patch.dict(os.environ, {"DEBUG": "0"}), patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-            with self.assertLogs(bridge.LOGGER, level="WARNING") as captured:
-                enabled_result = bridge.lambda_handler(ask_event(), Context())
-        self.assertEqual(len(captured.output), 1)
-        self.assertIn("category=http_error status=400", captured.output[0])
-        self.assertEqual(results[0]["response"], results[1]["response"])
-        self.assertEqual(results[0]["response"], enabled_result["response"])
-        opener.open.assert_called_once()
-
-    def test_custom_logs_timeout_connection_tls_json_and_speech_categories(self):
-        failures = (
-            (TimeoutError("private timeout"), None, "category=timeout"),
-            (URLError("private connection detail"), None, "category=connection_error"),
-            (ssl.SSLError("private certificate detail"), None, "category=tls_error"),
-            (None, b"private malformed body", "category=invalid_json"),
-            (None, b"\xff", "category=invalid_json"),
-            (None, b'{"response":{}}', "category=unusable_speech"),
-        )
-        for failure, body, expected in failures:
-            with self.subTest(expected=expected):
-                opener = unittest.mock.Mock()
-                if failure is not None:
-                    opener.open.side_effect = failure
-                else:
-                    opener.open.return_value = FakeHTTPResponse(body)
-                with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-                    with self.assertLogs(bridge.LOGGER, level="WARNING") as captured:
-                        bridge.lambda_handler(ask_event("private question"), Context())
-                opener.open.assert_called_once()
-                self.assertEqual(len(captured.output), 1)
-                self.assertIn(expected, captured.output[0])
-                self.assertNotIn("private", captured.output[0])
-
-    def test_transport_http_malformed_empty_and_timeout_are_honest_and_not_retried(self):
-        failures = [
-            URLError("offline"),
-            HTTPError("https://ha.example", 302, "redirect", {}, None),
-            b"not json",
-            b'{"response":{}}',
-            b'[]',
-            b'{"response":null}',
-            b'{"response":{"speech":null}}',
-            TimeoutError(),
-        ]
-        for failure in failures:
-            with self.subTest(failure=failure):
-                opener = unittest.mock.Mock()
-                if isinstance(failure, bytes):
-                    opener.open.return_value = FakeHTTPResponse(failure)
-                else:
-                    opener.open.side_effect = failure
-                with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-                    result = bridge.lambda_handler(ask_event(), Context())
-                opener.open.assert_called_once()
-                self.assertIn("can't confirm whether the action was carried out", result["response"]["outputSpeech"]["text"])
-
-    def test_local_replies_preserve_session_context_for_follow_up(self):
-        for intent in (
-            {"name": "AMAZON.HelpIntent"},
-            {"name": "AMAZON.FallbackIntent"},
-            {"name": "AskHomeIntent", "slots": {}},
-        ):
-            event = {"session": {"attributes": {"conversation_id": "active"}}, "request": {"type": "IntentRequest", "locale": "en-GB", "intent": intent}}
-            reply = bridge.lambda_handler(event, Context())
-            self.assertEqual(reply["sessionAttributes"], {"conversation_id": "active"})
-
-        opener = unittest.mock.Mock()
-        opener.open.return_value = FakeHTTPResponse(b'{"response":{"speech":{"plain":{"speech":"Hello again"}}}}')
-        with patch.object(bridge.urllib.request, "build_opener", return_value=opener):
-            bridge.lambda_handler(ask_event(attrs={"conversation_id": "active"}), Context())
-        self.assertEqual(json.loads(opener.open.call_args.args[0].data)["conversation_id"], "active")
-
-    def test_fresh_session_local_reply_drops_old_context(self):
-        event = {"session": {"new": True, "attributes": {"conversation_id": "old"}}, "request": {"type": "IntentRequest", "locale": "en-GB", "intent": {"name": "AMAZON.HelpIntent"}}}
-        self.assertNotIn("sessionAttributes", bridge.lambda_handler(event, Context()))
-
-    def test_https_url_validation_precedes_network(self):
-        for url in ("http://ha.example", "https://ha.example/base", "https://user:pass@ha.example", "https://ha.example?token=x", "https://ha.example#x"):
-            with self.subTest(url=url), patch.dict(os.environ, {"BASE_URL": url}), patch.object(bridge.urllib.request, "build_opener") as opener:
-                result = bridge.lambda_handler(ask_event(), Context())
-                opener.assert_not_called()
-                self.assertIn("can't confirm", result["response"]["outputSpeech"]["text"])
-
-    def test_redirect_handler_refuses_redirect(self):
-        handler = bridge._NoRedirect()
-        self.assertIsNone(handler.redirect_request(None, None, 302, "Found", {}, "https://other.example"))
-
-    def test_local_intents_and_follow_up_session_behavior(self):
-        launch = {"request": {"type": "LaunchRequest", "locale": "it-IT"}}
-        self.assertFalse(bridge.lambda_handler(launch, None)["response"]["shouldEndSession"])
-        stop = {"request": {"type": "IntentRequest", "locale": "it-IT", "intent": {"name": "AMAZON.StopIntent"}}}
-        self.assertTrue(bridge.lambda_handler(stop, None)["response"]["shouldEndSession"])
-        fallback = {"request": {"type": "IntentRequest", "locale": "en-GB", "intent": {"name": "AMAZON.FallbackIntent"}}}
-        self.assertFalse(bridge.lambda_handler(fallback, None)["response"]["shouldEndSession"])
-
-    def test_interaction_model_json_has_one_search_query_slot(self):
-        for filename in ("interaction_models/it-IT.json", "interaction_models/en-GB.json"):
-            with open(filename, encoding="utf-8") as model_file:
-                model = json.load(model_file)["interactionModel"]["languageModel"]
-            if filename.endswith("it-IT.json"):
-                self.assertEqual(model["invocationName"], "assistente casa")
-            ask = next(intent for intent in model["intents"] if intent["name"] == "AskHomeIntent")
-            self.assertEqual(ask["slots"], [{"name": "query", "type": "AMAZON.SearchQuery"}])
-            self.assertTrue(ask["samples"])
-            for sample in ask["samples"]:
-                self.assertIn("{query}", sample)
-                self.assertTrue(sample.replace("{query}", "").strip())
 
     def test_smart_home_discovery_forwards_full_event_and_returns_response_unchanged(self):
         event = smart_home_event()
@@ -496,11 +228,12 @@ class BridgeTests(unittest.TestCase):
 
     def test_package_allowlists_are_explicit_and_archives_reproducible(self):
         self.assertEqual(package_builder.RUNTIME_FILES, ("LICENSE", "lambda_function.py"))
-        self.assertEqual(len(package_builder.SOURCE_FILES), 8)
+        self.assertEqual(len(package_builder.SOURCE_FILES), 12)
         self.assertEqual(set(package_builder.SOURCE_FILES), {
             ".gitignore", "LICENSE", "README.md",
             "interaction_models/en-GB.json", "interaction_models/it-IT.json",
             "lambda_function.py", "package.py", "test_bridge.py",
+            "test_async.py", "deployment.yaml", "DEPLOYMENT.md", "requirements-dev.txt",
         })
         for filename in package_builder.RUNTIME_FILES + package_builder.SOURCE_FILES:
             self.assertNotIn("..", Path(filename).parts)

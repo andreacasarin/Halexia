@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Halexia Alexa bridge, independent inference worker, and temporary jobs
+Parameters:
+  CodeBucket:
+    Type: String
+    Description: Existing private S3 bucket in this region containing the runtime ZIP
+  CodeKey:
+    Type: String
+    Description: Immutable S3 object key; change it on each code update
+  BaseUrl:
+    Type: String
+    AllowedPattern: 'https://[^/?#@]+/?'
+  AgentId:
+    Type: String
+    MinLength: 1
+  SkillId:
+    Type: String
+    AllowedPattern: 'amzn1.ask.skill.[a-zA-Z0-9-]+'
+  ExistingBridgeArn:
+    Type: String
+    Default: ''
+    Description: Optional existing unqualified bridge ARN to retain (updated separately)
+  ExistingBridgeRoleName:
+    Type: String
+    Default: ''
+    Description: Required with ExistingBridgeArn; attach only jobs/worker permissions
+Conditions:
+  CreateBridge: !Equals [!Ref ExistingBridgeArn, '']
+  UseExistingBridge: !Not [!Equals [!Ref ExistingBridgeArn, '']]
+Resources:
+  Jobs:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: owner
+          AttributeType: S
+        - AttributeName: key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: owner
+          KeyType: HASH
+        - AttributeName: key
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkerJobsAndLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+                Resource: !GetAtt Jobs.Arn
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-worker:*'
+  Worker:
+    Type: AWS::Lambda::Function
+    DependsOn: WorkerLogs
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-worker'
+      Runtime: python3.12
+      Handler: alexa_bridge.lambda_function.worker_handler
+      Role: !GetAtt WorkerRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          BASE_URL: !Ref BaseUrl
+          AGENT_ID: !Ref AgentId
+          JOBS_TABLE: !Ref Jobs
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: INFO
+  WorkerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-worker'
+      RetentionInDays: 7
+  WorkerAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref Worker
+      Qualifier: '$LATEST'
+      MaximumEventAgeInSeconds: 60
+      MaximumRetryAttempts: 0
+  BridgeRole:
+    Type: AWS::IAM::Role
+    Condition: CreateBridge
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BridgeJobsWorkerAndLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+                Resource: !GetAtt Jobs.Arn
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt Worker.Arn
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-bridge:*'
+  Bridge:
+    Type: AWS::Lambda::Function
+    Condition: CreateBridge
+    DependsOn: [BridgeLogs, WorkerAsyncConfig]
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-bridge'
+      Runtime: python3.12
+      Handler: alexa_bridge.lambda_function.lambda_handler
+      Role: !GetAtt BridgeRole.Arn
+      Timeout: 8
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          BASE_URL: !Ref BaseUrl
+          AGENT_ID: !Ref AgentId
+          JOBS_TABLE: !Ref Jobs
+          WORKER_FUNCTION_ARN: !GetAtt Worker.Arn
+          RESPONSE_BUDGET_SECONDS: '5'
+          SKILL_ID: !Ref SkillId
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: INFO
+  BridgeLogs:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateBridge
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-bridge'
+      RetentionInDays: 7
+  CustomPermission:
+    Type: AWS::Lambda::Permission
+    Condition: CreateBridge
+    Properties:
+      FunctionName: !Ref Bridge
+      Action: lambda:InvokeFunction
+      Principal: alexa-appkit.amazon.com
+      EventSourceToken: !Ref SkillId
+  SmartHomePermission:
+    Type: AWS::Lambda::Permission
+    Condition: CreateBridge
+    Properties:
+      FunctionName: !Ref Bridge
+      Action: lambda:InvokeFunction
+      Principal: alexa-connectedhome.amazon.com
+      EventSourceToken: !Ref SkillId
+  ExistingBridgePolicy:
+    Type: AWS::IAM::Policy
+    Condition: UseExistingBridge
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-async-jobs'
+      Roles: [!Ref ExistingBridgeRoleName]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+            Resource: !GetAtt Jobs.Arn
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !GetAtt Worker.Arn
+Outputs:
+  BridgeArn:
+    Value: !If [CreateBridge, !GetAtt Bridge.Arn, !Ref ExistingBridgeArn]
+    Description: Set BOTH Alexa endpoints to this ARN; keep the existing account link
+  WorkerArn:
+    Value: !GetAtt Worker.Arn
+  JobsTable:
+    Value: !Ref Jobs
