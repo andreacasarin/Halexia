@@ -19,13 +19,25 @@ flowchart LR
     B -->|answer or pending acknowledgement| A
 ```
 
-Each accepted Custom question starts one independent worker invocation. The bridge briefly polls for its completed answer: fast inference still produces a direct spoken answer. If inference takes longer, Alexa says **“I’m preparing the answer. In a few seconds, ask me: is it ready?”** The user must request the result; Halexia never makes Alexa speak later automatically. Progressive responses do not extend Alexa's approximately eight-second response window ([Alexa documentation](https://developer.amazon.com/en-US/docs/alexa/custom-skills/send-the-user-a-progressive-response.html)).
+Custom requests use two AWS Lambda functions and one DynamoDB table:
 
-The bridge's initial-question response budget defaults to five seconds, including AWS dispatch and polling. Each result/status request, such as **“is it ready?”**, waits up to five additional seconds for the same job to finish and returns the answer as soon as it is available. A status request has a 6.6-second total application budget, reserving time for storage reads and returning the saved result; cold startup and remaining Lambda time can shorten the polling window. If the job is still unfinished, Alexa says **“The answer isn’t ready yet. In a few seconds, ask me again: is it ready?”**, keeps the session open, and includes a fixed Alexa reprompt reminding the user what to say if they remain silent. The reprompt is only a reminder, never automatic delivery of a completed answer. Status checks never restart inference or extend the worker's processing deadline. AWS SDK calls have short connection/read timeouts and no automatic retries. This is an application budget, not a guarantee about DNS, cold starts, AWS scheduling, network delivery, or Alexa's full round trip. Measure acknowledgement latency separately from worker duration in your deployment.
+| Component | Purpose |
+| --- | --- |
+| **Bridge Lambda** | Receives Alexa requests, creates the user's job, invokes the worker asynchronously, and checks DynamoDB for the result. It returns an answer or a pending acknowledgement within a bounded response budget. |
+| **Worker Lambda** | Calls Home Assistant's `/api/conversation/process` and saves the answer, status, and conversation ID to DynamoDB. It runs as a separate invocation and can continue after the bridge returns. |
+| **DynamoDB** | Shares job state between the two Lambdas and later Alexa requests. Conditional writes prevent duplicate inference; stored results remain available across skill sessions for up to 15 minutes. The table uses on-demand, pay-per-request billing. |
 
-The worker runs independently for up to 120 seconds. Its Home Assistant HTTP socket timeout is 110 seconds, shortened by remaining worker time; the Lambda timeout supplies the overall execution bound. A job still queued or running after 180 seconds reports explicit failure, including if a worker was killed or never delivered. Home Assistant may continue a request after a network timeout; Halexia never retries it automatically or claims an action succeeded without an answer.
+The bridge first reserves a job in DynamoDB, then sends the question and linked account credential to the worker through Lambda's asynchronous invocation queue. The worker's lifetime is independent of the Alexa request: it does not rely on a background thread surviving after the bridge returns. DynamoDB is required by this implementation to coordinate execution and retrieve the result after the original invocation has ended. Raw credentials and question text are not stored in the table; see [Authorization and credentials](#authorization-and-credentials).
 
-Smart Home directives keep the existing synchronous route to `/api/alexa/smart_home`, with the existing six-second HTTP socket timeout and authorization/error behavior. They do not create jobs or require Custom configuration.
+The bridge's initial response budget defaults to five seconds, including dispatch and polling. If the worker finishes quickly, Alexa speaks the answer directly. Otherwise, Alexa says **“I’m preparing the answer. In a few seconds, ask me: is it ready?”** The worker continues processing and writes its result to DynamoDB when finished.
+
+When the user asks **“is it ready?”**, a new bridge invocation checks the same job and waits up to five more seconds. It returns the saved answer as soon as it is available, or says **“The answer isn’t ready yet. In a few seconds, ask me again: is it ready?”** and keeps the session open with a repeat prompt. This status check never restarts inference. The user must request a slow answer; Halexia does not make Alexa speak a completed answer automatically.
+
+Alexa requires a complete response within approximately eight seconds; progressive responses do not extend that window ([Alexa documentation](https://developer.amazon.com/en-US/docs/alexa/custom-skills/send-the-user-a-progressive-response.html)). Each status request has a 6.6-second total application budget, including storage operations. Cold startup and remaining Lambda time can shorten the wait. These application budgets do not guarantee Alexa's full round-trip latency; measure acknowledgements separately from worker execution.
+
+The worker has a 120-second Lambda timeout and a 110-second Home Assistant HTTP socket timeout, shortened by remaining worker time. Jobs still queued or running after 180 seconds report explicit failure. Home Assistant may continue a request after a network timeout; Halexia never retries it automatically or claims an action succeeded without an answer.
+
+Smart Home directives retain their synchronous route through the bridge to `/api/alexa/smart_home`, with the existing six-second HTTP socket timeout. They do not use the worker or DynamoDB.
 
 ## Voice models
 
