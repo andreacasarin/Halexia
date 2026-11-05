@@ -4,6 +4,8 @@ A self-deployed Alexa Smart Home and Custom skill bridge for Home Assistant, usi
 
 Each operator deploys their own AWS resources and links their own Home Assistant account. This repository is not a shared Alexa skill.
 
+Download the Lambda runtime from [GitHub Releases](https://github.com/andreacasarin/Halexia/releases/latest) or use the [direct ZIP download](https://github.com/andreacasarin/Halexia/releases/latest/download/halexia.zip). Follow the [deployment guide](DEPLOYMENT.md) to create the bridge, worker, and temporary job storage.
+
 ## Request flow
 
 ```mermaid
@@ -17,7 +19,7 @@ flowchart LR
     B -->|answer or pending acknowledgement| A
 ```
 
-Every Custom question starts one independent worker invocation. The bridge briefly polls for its completed answer: fast inference still produces a direct spoken answer. If inference takes longer, Alexa says **“I’m preparing the answer. In a few seconds, ask me: is it ready?”** The user must request the result; Halexia never makes Alexa speak later automatically. Progressive responses do not extend Alexa's approximately eight-second response window ([Alexa documentation](https://developer.amazon.com/en-US/docs/alexa/custom-skills/send-the-user-a-progressive-response.html)).
+Each accepted Custom question starts one independent worker invocation. The bridge briefly polls for its completed answer: fast inference still produces a direct spoken answer. If inference takes longer, Alexa says **“I’m preparing the answer. In a few seconds, ask me: is it ready?”** The user must request the result; Halexia never makes Alexa speak later automatically. Progressive responses do not extend Alexa's approximately eight-second response window ([Alexa documentation](https://developer.amazon.com/en-US/docs/alexa/custom-skills/send-the-user-a-progressive-response.html)).
 
 The bridge's initial-question response budget defaults to five seconds, including AWS dispatch and polling. Each result/status request, such as **“is it ready?”**, waits up to five additional seconds for the same job to finish and returns the answer as soon as it is available. A status request has a 6.6-second total application budget, reserving time for storage reads and returning the saved result; cold startup and remaining Lambda time can shorten the polling window. If the job is still unfinished, Alexa says **“The answer isn’t ready yet. In a few seconds, ask me again: is it ready?”**, keeps the session open, and includes a fixed Alexa reprompt reminding the user what to say if they remain silent. The reprompt is only a reminder, never automatic delivery of a completed answer. Status checks never restart inference or extend the worker's processing deadline. AWS SDK calls have short connection/read timeouts and no automatic retries. This is an application budget, not a guarantee about DNS, cold starts, AWS scheduling, network delivery, or Alexa's full round trip. Measure acknowledgement latency separately from worker duration in your deployment.
 
@@ -35,6 +37,10 @@ Smart Home directives keep the existing synchronous route to `/api/alexa/smart_h
 | `it-IT` | `assistente casa` | `chiedi {query}`, `domanda {query}` | `è pronta`, `hai la risposta`, `dimmi la risposta` |
 
 Import and build both JSON models in `interaction_models/`. `AskHomeIntent` retains its `AMAZON.SearchQuery` slot; `AnswerStatusIntent` has no slots and never forwards a new question to Home Assistant. The five-second status wait, pending messages, and reprompts are Lambda behavior with English and Italian translations: updating that behavior does not require another model import/build when `AnswerStatusIntent` is already present and built for that locale.
+
+**Use a question prefix for every new question, including conversational follow-ups:** `ask …` or `question …` in English; `chiedi …` or `domanda …` in Italian. Questions without those prefixes may receive the “I didn't understand” fallback before reaching Home Assistant. Result checks such as **“is it ready?”** and **“è pronta?”** use their own intent and do not need a question prefix.
+
+Wait for Alexa to finish speaking, then respond while the device is listening. The five-second result wait gives inference more time; it does not change Alexa's speech-capture window. If the microphone has closed, reopen the skill before asking for the saved answer.
 
 English example: **“Alexa, open home assistant”**, then **“ask what is the temperature in the study”**. For a slow answer, say **“is it ready?”** after the acknowledgement. If the listening window has closed, reopen **home assistant**, then say **“tell me the answer”**.
 
@@ -60,7 +66,7 @@ The raw access token and question travel only in the asynchronous worker invocat
 
 ## Build, deploy, and verify
 
-**Upgrade notice:** Custom requests now require a separate worker Lambda and temporary DynamoDB storage. Existing single-Lambda installations must follow the existing-Lambda upgrade steps before using this runtime. Keep the current Home Assistant account link and Smart Home endpoint.
+**v2 upgrade notice:** Custom requests now require a separate worker Lambda and temporary DynamoDB storage. Existing single-Lambda installations must follow the [existing-Lambda upgrade steps](DEPLOYMENT.md#existing-lambda-upgrade-retain-the-endpoint-arn) before using this runtime. Keep the current Home Assistant account link and Smart Home endpoint.
 
 See **[DEPLOYMENT.md](DEPLOYMENT.md)** for exact new-install and existing-Lambda upgrade steps, resources, IAM, settings, rollback, latency measurement, and the real-Echo acceptance procedure. Uploading the old single Lambda alone is no longer sufficient for Custom requests.
 
